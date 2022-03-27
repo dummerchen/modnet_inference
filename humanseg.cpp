@@ -21,37 +21,29 @@ HumanSeg::HumanSeg(std::wstring model_path, int num_threads = 1)
 	input_node_names = { input_name };
 	Ort::TypeInfo info = session.GetInputTypeInfo(0);
 	//cout << "input name:" << input_name << "node dim" << info.GetTensorTypeAndShapeInfo().GetShape() << endl;
-	
+
 	// 获取输出name和
 	const char* output_name = session.GetOutputName(0, allocator);
 	out_node_names = { output_name };
-	std::cout << "output name:" << output_name << std::endl;
 }
 
 cv::Mat HumanSeg::normalize(cv::Mat &image) {
 	std::vector<cv::Mat> channels, normalized_image;
-	// image分离到vector
+	// image分离到vector,rgb格式
 	cv::split(image, channels);
-
-	cv::Mat r, g, b;
-	b = channels.at(0);
-	g = channels.at(1);
-	r = channels.at(2);
+	channels[0] = (channels[0] - 0.485) / 0.229;
+	channels[1] = (channels[1] - 0.456) / 0.224;
+	channels[2] = (channels[2] - 0.406) / 0.225;
+	cv::Mat normal_image;
+	//normal_image = image;
+	//normal_image = (image - 0.5) / 0.5;
+	//b = channels.at(0);
+	//g = channels.at(1);
+	//r = channels.at(2);
 	// (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
-	// -1~1
-	b = (b / 255. - 0.5) / 0.5;
-	g = (g / 255. - 0.5) / 0.5;
-	r = (r / 255. - 0.5) / 0.5;
-	//r = (r / 255. - normalized_param[0][0]) / normalized_param[1][0];
-	//g = (g / 255. - normalized_param[0][1]) / normalized_param[1][1];
-	//b = (b / 255. - normalized_param[0][2]) / normalized_param[1][2];
 
-	normalized_image.push_back(r);
-	normalized_image.push_back(g);
-	normalized_image.push_back(b);
-
-	cv::Mat normal_image;// 合成图片
-	cv::merge(normalized_image,normal_image);
+	// 合成图片
+	cv::merge(channels,normal_image); //6ms
 	return normal_image;
 }
 
@@ -64,6 +56,7 @@ vector<cv::Mat> HumanSeg::preprocess(cv::Mat &image)
 	image_h = image.rows;
 	image_w = image.cols;
 	int rw, rh;
+	/*
 	if (image_w > image_h)
 	{
 		rh = 512;
@@ -76,63 +69,60 @@ vector<cv::Mat> HumanSeg::preprocess(cv::Mat &image)
 	}
 	rh -= rh % 32;
 	rw -= rw % 32;
+	*/
 
 	// 图像还是出bug了，有时间能改就改
 	rh = rw = refsize;
 	cv::Mat resized_image,resized_image_float,normalized_image;
-	cv::resize(image, resized_image, cv::Size(rw,rh),0,0,cv::INTER_AREA);
-	resized_image.convertTo(resized_image_float, CV_32F);
-	normalized_image = normalize(resized_image_float);
+	cv::cvtColor(image, image, cv::ColorConversionCodes::COLOR_BGR2RGB);
+	cv::resize(image, resized_image, cv::Size(rw,rh),0,0,cv::INTER_AREA); //41ms
+	
+	resized_image.convertTo(resized_image_float, CV_32F,1.0/255); //14 ms 
+	normalized_image = normalize(resized_image_float); // 16ms
 	input_node_dims = { 1,3,rh,rw };
 	return { resized_image,normalized_image };
 }
-void addAlpha(cv::Mat& src, cv::Mat& dst, cv::Mat& alpha)
+
+
+cv::Mat add_alpha(cv::Mat image, cv::Mat mask)
 {
-	if (src.channels() == 4)
+	cv::Mat channels[3];
+	cv::split(image, channels);
+	for (int i = 0; i < 512; i++)
 	{
-		return ;
+		for (int j = 0; j < 512; j++)
+		{
+			float m = mask.at<float>(i, j);
+			image.at<cv::Vec3b>(i, j)[0] = image.at<cv::Vec3b>(i, j)[0] * m + (1 - m)*255;
+			image.at<cv::Vec3b>(i, j)[1] = image.at<cv::Vec3b>(i, j)[1] * m + (1 - m) * 255;
+			image.at<cv::Vec3b>(i, j)[2] = image.at<cv::Vec3b>(i, j)[2] * m + (1 - m) * 255;
+
+		}
 	}
-	else if (src.channels() == 1)
-	{
-		cv::cvtColor(src, src, cv::COLOR_GRAY2RGB);
-	}
-
-	dst = cv::Mat(src.rows, src.cols, CV_8UC4);
-
-	std::vector<cv::Mat> srcChannels;
-	std::vector<cv::Mat> dstChannels;
-	//分离通道
-	cv::split(src, srcChannels);
-
-	dstChannels.push_back(srcChannels[0]);
-	dstChannels.push_back(srcChannels[1]);
-	dstChannels.push_back(srcChannels[2]);
-	//添加透明度通道
-	dstChannels.push_back(alpha);
-	//合并通道
-	cv::merge(dstChannels, dst);
-
-	return ;
+	return image;
 }
 /*
 * postprocess: preprocessed image -> infer -> postprocess
 */
-vector<cv::Mat > HumanSeg::predict(const string& src_path, const string& dst_path,const string image_or_video) 
+cv::Mat HumanSeg::predict(cv::Mat &image,const string image_or_video) 
 {
 	//cout<<"!!" << endl;
-	cv::Mat image = cv::imread(src_path);
-	cv::Mat preprocessed_image, resized_image;
-	preprocessed_image= preprocess(image)[1];
+	
+	cv::Mat normalized_image, resized_image;
+	normalized_image= preprocess(image)[1];
 	resized_image = preprocess(image)[0];
 
-	cv::Mat blob = cv::dnn::blobFromImage(preprocessed_image, 1, cv::Size((preprocessed_image.rows), int(preprocessed_image.cols)), cv::Scalar(0, 0, 0), false, true);
-	
+	// 14ms
+	//cv::Mat blob = cv::dnn::blobFromImage(preprocessed_image, 1, cv::Size((preprocessed_image.rows), (preprocessed_image.cols)), cv::Scalar(0, 0, 0), false, true);
+	cv::Mat blob = cv::dnn::blobFromImage(normalized_image, 1, cv::Size((512),(512)), cv::Scalar(0, 0, 0), false, true);
+
 	
 	// create input tensor
 	auto memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 
 	input_tensors.emplace_back(Ort::Value::CreateTensor<float>(memory_info, blob.ptr<float>(), blob.total(), input_node_dims.data(), input_node_dims.size()));
-
+	
+	// 798ms
 	std::vector<Ort::Value> output_tensors = session.Run(
 		Ort::RunOptions{ nullptr },
 		input_node_names.data(),
@@ -144,21 +134,18 @@ vector<cv::Mat > HumanSeg::predict(const string& src_path, const string& dst_pat
 	// h,w,3
 
 	float* floatarr = output_tensors[0].GetTensorMutableData<float>();
-
 	cv::Mat mask, mask_1f;
 	mask_1f = cv::Mat1f(input_node_dims[2],input_node_dims[3], floatarr);
-	mask_1f *= 255;
-	mask_1f.convertTo(mask, CV_8U);
-	//cout<<"mask suc" << endl;
+	//mask_1f *= 255.0;
+	//mask_1f.convertTo(mask, CV_8U);
 	
-	cv::Mat pre_image,without_bg;
-	// mask不为0的地方全变黑
+	cv::Mat pre_image,without_bg,mask_thresh;
+	pre_image=add_alpha(resized_image, mask_1f);
 
-	//cv::imwrite(dst_path, mask);
-	addAlpha(resized_image,pre_image, mask);
-	cv::resize(pre_image, without_bg, cv::Size(image_w, image_h), 0, 0, cv::INTER_AREA);
-
-	//std::cout << "predict image over" << std::endl;
+	//cv::threshold(mask, mask_thresh, 250, 255, cv::THRESH_BINARY);
+	//cv::bitwise_and(resized_image,resized_image, pre_image, mask_thresh);
+	
+	cv::resize(pre_image, without_bg, cv::Size(image_w, image_h), 0, 0, cv::INTER_AREA);// 123ms
 	input_tensors.clear();
-	return {without_bg,mask};
+	return without_bg;
 }

@@ -1,5 +1,3 @@
-
-#pragma once
 #include <string>
 #include <onnxruntime_cxx_api.h>
 #include <iostream>
@@ -20,7 +18,7 @@ protected:
 
 	std::vector<const char*> input_node_names;
 	// b,c,h,w
-	std::vector<int64_t> input_node_dims;
+	std::vector<int64_t> input_node_dims{1,1,512,512};
 	size_t input_tensor_size;
 
 	std::vector<const char*> out_node_names;
@@ -38,5 +36,5 @@ public:
 	HumanSeg() =delete;
 	HumanSeg(std::wstring model_path, int num_threads);
 	
-	vector <cv::Mat> predict(const string& src_path, const string& dst_path,const string image_or_video);
+	cv::Mat predict(cv::Mat &image,const string image_or_video);
 };
